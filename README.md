@@ -1,6 +1,6 @@
-# smartloop-cli
+# Smartloop Command Line Interface
 
-Smartloop Command Line Interface.
+Smartloop CLI is designed to use with studio desktop and interacting with local service to manage projects, documents, skills and connections
 
 ## Requirements
 
