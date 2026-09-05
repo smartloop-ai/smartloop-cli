@@ -1,71 +1,53 @@
-#!/bin/sh
+#!/bin/bash
 # Smartloop CLI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | bash
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)
-#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: the first of
-#                              $CARGO_HOME/bin or ~/.local/bin that is already
-#                              on PATH, else $HOME/.smartloop/bin)
-set -eu
+#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: $CARGO_HOME/bin when a
+#                              Rust toolchain is present, else ~/.local/bin)
+set -euo pipefail
 
 REPO="smartloop-ai/smartloop-cli"
 
-on_path() {
-    case ":${PATH}:" in
-        *":$1:"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# Where the binary lands.  Nothing this script does can change the PATH of the
-# shell that invoked it -- piped into `sh`, it is a child process -- so aim for
-# a directory the user's PATH already covers and there is nothing left to do.
-#
-# A Rust toolchain has $CARGO_HOME/bin on PATH; failing that, ~/.local/bin is
-# the conventional home for user-installed binaries and most distributions put
-# it on PATH already.  Only when neither applies do we fall back to our own
-# directory and print advice.  ($HOME/.smartloop is the studio's data
-# directory, so the binary sits beside it rather than inside the data itself.)
-default_install_dir() {
-    cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-    if [ -d "$cargo_bin" ] && [ -w "$cargo_bin" ]; then
-        printf '%s\n' "$cargo_bin"
-        return
-    fi
-
-    local_bin="$HOME/.local/bin"
-    if on_path "$local_bin" && { [ -w "$local_bin" ] || [ ! -e "$local_bin" ]; }; then
-        printf '%s\n' "$local_bin"
-        return
-    fi
-
-    printf '%s\n' "$HOME/.smartloop/bin"
-}
-
-INSTALL_DIR="${SMARTLOOP_CLI_INSTALL_DIR:-$(default_install_dir)}"
-
-# Colors, only when stdout is a terminal.  These hold real escape bytes rather
-# than the two-character "\033" sequence, because printf expands escapes in its
-# format string but never in an argument -- and these get interpolated into
-# both.
+# Colors, only when stdout is a terminal.
 if [ -t 1 ]; then
-    esc="$(printf '\033')"
-    GREEN="${esc}[1;32m"; RED="${esc}[0;31m"; BOLD="${esc}[1m"; NC="${esc}[0m"
+    MUTED='\033[0;2m'
+    PINK='\033[38;5;205m'
+    GREEN='\033[1;32m'
+    RED='\033[0;31m'
+    BOLD='\033[1m'
+    NC='\033[0m'
 else
-    GREEN=''; RED=''; BOLD=''; NC=''
+    MUTED=''; PINK=''; GREEN=''; RED=''; BOLD=''; NC=''
 fi
 
-info() { printf '%s\n' "$1"; }
-error() { printf "${RED}Error:${NC} %s\n" "$1" >&2; exit 1; }
+error() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
+
+# One trap for both jobs: the scratch directory, and the cursor that
+# download_with_progress hides -- a crash mid-download would otherwise leave it
+# hidden in the user's terminal.
+cleanup() {
+    # Only when stdout is a terminal, or the escape shows up as literal bytes
+    # in redirected output.
+    [ -t 1 ] && printf '\033[?25h' 2>/dev/null
+    [ -n "${TMP_DIR:-}" ] && rm -rf "$TMP_DIR"
+    return 0
+}
+trap cleanup EXIT INT TERM
 
 need() {
     command -v "$1" >/dev/null 2>&1 || error "$1 is required but not installed"
 }
 
+on_path() {
+    [[ ":${PATH}:" == *":$1:"* ]]
+}
+
 # Map uname output onto the Rust target triple the release is built for.
 detect_target() {
+    local os arch os_part arch_part
     os="$(uname -s)"
     arch="$(uname -m)"
 
@@ -86,6 +68,7 @@ detect_target() {
         error "Windows builds are published for x86_64 only"
     fi
 
+    OS="$os_part"
     TARGET="${arch_part}-${os_part}"
     if [ "$os_part" = "pc-windows-msvc" ]; then
         ARCHIVE_EXT="zip"
@@ -101,6 +84,7 @@ detect_target() {
 # /releases instead of /releases/tag/vX.Y.Z, so require the /tag/ segment
 # rather than handing the caller back a URL as if it were a version.
 latest_version() {
+    local url
     url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
         "https://github.com/${REPO}/releases/latest")" || return 1
 
@@ -111,67 +95,269 @@ latest_version() {
 }
 
 verify_checksum() {
-    archive="$1"
-    sums="$2"
+    local archive="$1" sums="$2" actual expected
 
     if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+        actual="$(sha256sum "$archive" | awk '{print $1}')"
     elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+        actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
     else
-        info "No sha256 tool found; skipping checksum verification"
+        echo -e "${MUTED}No sha256 tool found; skipping checksum verification${NC}"
         return 0
     fi
 
-    expected="$(grep " $(basename "$archive")\$" "$sums" | cut -d' ' -f1)"
+    expected="$(grep " $(basename "$archive")\$" "$sums" | awk '{print $1}')"
     [ -n "$expected" ] || error "No checksum published for $(basename "$archive")"
     [ "$actual" = "$expected" ] || error "Checksum mismatch for $(basename "$archive")"
 }
 
-main() {
+# Integer arithmetic only -- the reference installer shells out to bc for this,
+# but bc is absent from many minimal images and one decimal place does not
+# warrant the dependency.
+format_bytes() {
+    local n="$1"
+    if [ "$n" -ge 1073741824 ]; then
+        printf '%d.%d GB' "$(( n / 1073741824 ))" "$(( (n % 1073741824) * 10 / 1073741824 ))"
+    elif [ "$n" -ge 1048576 ]; then
+        printf '%d.%d MB' "$(( n / 1048576 ))" "$(( (n % 1048576) * 10 / 1048576 ))"
+    else
+        printf '%d KB' "$(( n / 1024 ))"
+    fi
+}
+
+# progress_bar -- adapted from progress-bar.sh by Edouard Lopez
+# https://github.com/edouard-lopez/progress-bar.sh -- MIT License
+progress_bar() {
+    local bytes="$1" length="$2" label="${3:-Downloading}"
+    [ "$length" -gt 0 ] || return 0
+
+    local columns space_reserved=6
+    columns="$(tput cols 2>/dev/null || echo 80)"
+    local space_available=$(( columns - space_reserved ))
+    [ "$space_available" -lt 10 ] && space_available=10
+
+    local percent=$(( bytes * 100 / length ))
+    [ "$percent" -gt 100 ] && percent=100
+
+    local filled=$(( percent * space_available / 100 ))
+
+    local bar="" i
+    for (( i=0; i<filled; i++ )); do bar+="▇"; done
+    for (( i=filled; i<space_available; i++ )); do bar+=" "; done
+
+    local dl_str total_str
+    dl_str="$(format_bytes "$bytes")"
+    total_str="$(format_bytes "$length")"
+
+    # Two-line display: label on line 1, bar on line 2
+    printf "\r\033[K${MUTED}%s  %s / %s${NC}\n\r\033[K%s| %3d%%\033[1A\r" \
+        "$label" "$dl_str" "$total_str" "$bar" "$percent"
+}
+
+end_progress() {
+    # Move the cursor past the two-line progress display and restore it
+    printf "\n\n\033[?25h"
+}
+
+download_with_progress() {
+    local url="$1" output="$2" label="${3:-Downloading}"
+    local length=0 bytes=0
+
+    length="$(curl -sI -L "$url" | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r')"
+    length="${length:-0}"
+
+    if [ "$length" -gt 0 ] && [ -t 2 ]; then
+        printf "\033[?25l\n"
+        curl -sL "$url" -o "$output" &
+        local curl_pid=$!
+
+        while kill -0 "$curl_pid" 2>/dev/null; do
+            if [ -f "$output" ]; then
+                bytes="$(wc -c < "$output" 2>/dev/null | tr -d ' ')" || true
+                bytes="${bytes:-0}"
+                progress_bar "$bytes" "$length" "$label"
+            fi
+            sleep 0.1
+        done
+
+        local ret=0
+        wait "$curl_pid" || ret=$?
+        progress_bar "$length" "$length" "$label"
+        end_progress
+        [ "$ret" -eq 0 ] || error "Download failed: $url"
+    else
+        curl -fL --progress-bar "$url" -o "$output" || error "Download failed: $url"
+    fi
+}
+
+# Where the binary lands.  A Rust toolchain already has $CARGO_HOME/bin on
+# PATH, so installing there leaves nothing to configure.  Otherwise use
+# ~/.local/bin, the conventional home for user-installed binaries, and put it
+# on PATH below if it is not there already.
+default_install_dir() {
+    local cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+    if [[ -d "$cargo_bin" && -w "$cargo_bin" ]]; then
+        printf '%s\n' "$cargo_bin"
+    else
+        printf '%s\n' "$HOME/.local/bin"
+    fi
+}
+
+add_to_path() {
+    local config_file="$1" command="$2"
+
+    # Idempotent: re-running the installer must not stack duplicate exports.
+    if grep -Fxq "$command" "$config_file" 2>/dev/null; then
+        return 0
+    fi
+
+    if [[ -w "$config_file" ]]; then
+        printf '\n# smartloop\n%s\n' "$command" >> "$config_file"
+        echo -e "${MUTED}Added ${NC}smartloop${MUTED} to \$PATH in ${NC}${config_file}"
+    else
+        echo -e "${MUTED}Manually add to ${NC}${config_file}${MUTED}:${NC}"
+        echo -e "  $command"
+    fi
+}
+
+# Nothing this script does can change the PATH of the shell that invoked it --
+# piped into bash, it is a child process -- so persist the change in the rc
+# file the user's shell reads at startup instead.
+setup_path() {
+    local dir="$1" current_shell config_files path_command config_file="" f
+
+    on_path "$dir" && return 0
+
+    current_shell="$(basename "${SHELL:-bash}")"
+
+    case "$current_shell" in
+        fish)
+            config_files="$HOME/.config/fish/config.fish"
+            path_command="fish_add_path $dir"
+            ;;
+        zsh)
+            config_files="${ZDOTDIR:-$HOME}/.zshrc"
+            path_command="export PATH=\"${dir}:\$PATH\""
+            ;;
+        bash)
+            config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile"
+            path_command="export PATH=\"${dir}:\$PATH\""
+            ;;
+        *)
+            config_files="$HOME/.bashrc $HOME/.profile"
+            path_command="export PATH=\"${dir}:\$PATH\""
+            ;;
+    esac
+
+    for f in $config_files; do
+        if [[ -f "$f" ]]; then
+            config_file="$f"
+            break
+        fi
+    done
+
+    if [[ -z "$config_file" ]]; then
+        echo -e "${MUTED}No config file found for ${NC}${current_shell}${MUTED}. Manually add to your shell config:${NC}"
+        echo -e "  $path_command"
+        return 0
+    fi
+
+    add_to_path "$config_file" "$path_command"
+}
+
+print_banner() {
+    echo -e ""
+    echo -e "${PINK}█▀ █▀▄▀█ ▄▀█ █▀█ ▀█▀ █   █▀█ █▀█ █▀█${NC}"
+    echo -e "${PINK}▄█ █ ▀ █ █▀█ █▀▄  █  █▄▄ █▄█ █▄█ █▀▀${NC}"
+    echo -e ""
+    echo -e "${MUTED}Version: ${NC}${VERSION}"
+    echo -e ""
+
+    if on_path "$INSTALL_DIR"; then
+        echo -e "${MUTED}To get started:${NC}"
+        echo -e ""
+        echo -e "  smartloop project list  ${MUTED}# List your projects${NC}"
+    else
+        echo -e "${MUTED}To get started, restart your terminal or run:${NC}"
+        echo -e ""
+        case "$(basename "${SHELL:-bash}")" in
+            fish) echo -e "  source ~/.config/fish/config.fish" ;;
+            zsh)  echo -e "  source ${ZDOTDIR:-$HOME}/.zshrc" ;;
+            *)    echo -e "  source ~/.bashrc" ;;
+        esac
+        echo -e ""
+        echo -e "${MUTED}Then run:${NC}"
+        echo -e ""
+        echo -e "  smartloop project list  ${MUTED}# List your projects${NC}"
+    fi
+
+    echo -e ""
+    echo -e "${MUTED}For more information visit ${NC}https://smartloop.ai/docs/intro/"
+    echo -e ""
+}
+
+install_smartloop() {
     need curl
     need tar
 
+    echo -e "${MUTED}Reading package lists...${NC}"
     detect_target
+    echo -e "${MUTED}Reading package lists... Done${NC}"
 
     VERSION="${SMARTLOOP_CLI_VERSION:-$(latest_version || true)}"
     [ -n "$VERSION" ] || error "Could not determine the latest release; set SMARTLOOP_CLI_VERSION"
     VERSION="${VERSION#v}"
 
-    NAME="smartloop-${VERSION}-${TARGET}"
-    ARCHIVE="${NAME}.${ARCHIVE_EXT}"
-    BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
+    INSTALL_DIR="${SMARTLOOP_CLI_INSTALL_DIR:-$(default_install_dir)}"
+
+    local name="smartloop-${VERSION}-${TARGET}"
+    local archive="${name}.${ARCHIVE_EXT}"
+    local base_url="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+    echo -e "${MUTED}The following NEW packages will be installed:${NC}"
+    echo -e "  ${BOLD}smartloop${NC} ${MUTED}(${VERSION}, ${TARGET})${NC}"
 
     TMP_DIR="$(mktemp -d)"
-    trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
-    info "Installing ${BOLD}smartloop ${VERSION}${NC} (${TARGET})"
-
-    curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}" \
-        || error "Download failed: ${BASE_URL}/${ARCHIVE}"
-    curl -fsSL "${BASE_URL}/SHA256SUMS" -o "${TMP_DIR}/SHA256SUMS" \
+    echo -e "${MUTED}[1/3] Downloading smartloop (${VERSION})${NC}"
+    download_with_progress "${base_url}/${archive}" "${TMP_DIR}/${archive}" \
+        "Get:1 smartloop ${VERSION}"
+    curl -fsSL "${base_url}/SHA256SUMS" -o "${TMP_DIR}/SHA256SUMS" \
         || error "Could not download SHA256SUMS"
+    verify_checksum "${TMP_DIR}/${archive}" "${TMP_DIR}/SHA256SUMS"
 
-    verify_checksum "${TMP_DIR}/${ARCHIVE}" "${TMP_DIR}/SHA256SUMS"
-
+    echo -e "${MUTED}[2/3] Unpacking smartloop (${VERSION})${NC}"
     if [ "$ARCHIVE_EXT" = "zip" ]; then
         need unzip
-        unzip -q "${TMP_DIR}/${ARCHIVE}" -d "$TMP_DIR"
+        unzip -q "${TMP_DIR}/${archive}" -d "$TMP_DIR"
     else
-        tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
+        tar -xzf "${TMP_DIR}/${archive}" -C "$TMP_DIR"
     fi
 
+    echo -e "${MUTED}[3/3] Setting up smartloop (${VERSION})${NC}"
     mkdir -p "$INSTALL_DIR"
-    install -m 755 "${TMP_DIR}/${NAME}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null \
-        || { cp "${TMP_DIR}/${NAME}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" && chmod 755 "${INSTALL_DIR}/${BIN_NAME}"; }
+    install -m 755 "${TMP_DIR}/${name}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null \
+        || { cp "${TMP_DIR}/${name}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" \
+             && chmod 755 "${INSTALL_DIR}/${BIN_NAME}"; }
 
-    printf "${GREEN}Installed${NC} %s\n" "${INSTALL_DIR}/${BIN_NAME}"
+    "${INSTALL_DIR}/${BIN_NAME}" --version >/dev/null 2>&1 \
+        || error "Installation verification failed: 'smartloop --version' did not succeed"
 
-    if ! on_path "$INSTALL_DIR"; then
-        info ""
-        info "Add it to your PATH:"
-        info "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+    echo -e "${GREEN}Installed${NC} ${INSTALL_DIR}/${BIN_NAME}"
+
+    echo -e "${MUTED}Processing triggers for smartloop (${VERSION}) ...${NC}"
+    if [ "$OS" = "pc-windows-msvc" ]; then
+        # No POSIX rc file to edit under MSYS/Cygwin; install.ps1 sets the real
+        # Windows user PATH.
+        on_path "$INSTALL_DIR" || {
+            echo -e "${MUTED}Add the following to your PATH:${NC}"
+            echo -e "  ${BOLD}${INSTALL_DIR}${NC}"
+        }
+    else
+        setup_path "$INSTALL_DIR"
     fi
+
+    print_banner
 }
 
-main "$@"
+install_smartloop

@@ -7,7 +7,7 @@ Smartloop CLI is designed to use with studio desktop and interacting with local 
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | bash
 ```
 
 Windows (PowerShell):
@@ -16,18 +16,15 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.ps1 | iex
 ```
 
-The installer aims for a directory your `PATH` already covers, so there is
-nothing to configure afterwards. It picks the first of:
+The binary goes to `$CARGO_HOME/bin` (`~/.cargo/bin`) when a Rust toolchain
+already owns that directory, since it is on your `PATH` anyway; otherwise to
+`~/.local/bin`. If the chosen directory is not on your `PATH`, the installer
+appends an export line to the startup file for your shell — `~/.bashrc`,
+`~/.zshrc`, or `fish_add_path` in `config.fish` — so a new terminal picks it up.
+Re-running the installer will not add that line twice.
 
-1. `$CARGO_HOME/bin` (`~/.cargo/bin`), if a Rust toolchain put it there
-2. `~/.local/bin`, if it is already on your `PATH`
-3. `~/.smartloop/bin` otherwise — the installer then prints the `export PATH`
-   line to add
-
-Windows follows the same order minus step 2 (`~/.local/bin` is not a Windows
-convention), and when it does fall back to `%USERPROFILE%\.smartloop\bin` the
-installer adds that to your user `PATH` for you — restart the shell to pick it
-up.
+On Windows the binary goes to `%USERPROFILE%\.smartloop\bin` and the installer
+sets your user `PATH` through the registry. Restart the shell to pick it up.
 
 Set `SMARTLOOP_CLI_INSTALL_DIR` to install elsewhere, or `SMARTLOOP_CLI_VERSION`
 to pin a specific release.

@@ -26,6 +26,46 @@ $InstallDir = if ($env:SMARTLOOP_CLI_INSTALL_DIR) {
     Join-Path $HOME '.smartloop\bin'
 }
 
+# ANSI colors. Windows Terminal and PowerShell 7 render these; older consoles
+# on Windows 10+ do too once VT processing is on, which it is by default.
+$esc = [char]27
+$MUTED = "$esc[0;2m"; $PINK = "$esc[38;5;205m"; $GREEN = "$esc[1;32m"
+$BOLD = "$esc[1m"; $NC = "$esc[0m"
+
+function Write-Banner {
+    param([string]$Version, [string]$Dir)
+
+    # Built from char codes rather than `u{2588} escapes: `u{} is PowerShell 7
+    # only, and `irm | iex` runs under Windows PowerShell 5.1 on a stock box.
+    # Literal block characters in the source would be just as risky, since 5.1
+    # decodes a BOM-less script as ANSI.
+    $full = [char]0x2588   # full block
+    $upper = [char]0x2580  # upper half block
+    $lower = [char]0x2584  # lower half block
+    $render = {
+        param($template)
+        $template.Replace('#', $full).Replace('^', $upper).Replace('<', $lower)
+    }
+
+    Write-Host ""
+    Write-Host "$PINK$(& $render '#^ #^<^# <^# #^# ^#^ #   #^# #^# #^#')$NC"
+    Write-Host "$PINK$(& $render '<# # ^ # #^# #^<  #  #<< #<# #<# #^^')$NC"
+    Write-Host ""
+    Write-Host "${MUTED}Version: ${NC}$Version"
+    Write-Host ""
+
+    if (($env:Path -split ';') -contains $Dir) {
+        Write-Host "${MUTED}To get started:${NC}"
+    } else {
+        Write-Host "${MUTED}To get started, restart your terminal, then run:${NC}"
+    }
+    Write-Host ""
+    Write-Host "  smartloop project list  ${MUTED}# List your projects${NC}"
+    Write-Host ""
+    Write-Host "${MUTED}For more information visit ${NC}https://smartloop.ai/docs/intro/"
+    Write-Host ""
+}
+
 function Get-LatestVersion {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
         -Headers @{ 'User-Agent' = 'smartloop-cli-installer' }
@@ -51,13 +91,18 @@ $name = "smartloop-$version-$target"
 $archive = "$name.zip"
 $baseUrl = "https://github.com/$Repo/releases/download/v$version"
 
-Write-Host "Installing smartloop $version ($target)"
+Write-Host "${MUTED}Reading package lists... Done$NC"
+Write-Host "${MUTED}The following NEW packages will be installed:$NC"
+Write-Host "  ${BOLD}smartloop${NC} ${MUTED}($version, $target)${NC}"
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 
 try {
+    Write-Host "${MUTED}[1/3] Downloading smartloop ($version)${NC}"
     $archivePath = Join-Path $tmp $archive
+    # Invoke-WebRequest draws its own progress bar; leave $ProgressPreference
+    # at its default so the user sees it.
     Invoke-WebRequest -Uri "$baseUrl/$archive" -OutFile $archivePath
 
     $sumsPath = Join-Path $tmp 'SHA256SUMS'
@@ -71,18 +116,24 @@ try {
     $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected.ToLower()) { throw "Checksum mismatch for $archive" }
 
+    Write-Host "${MUTED}[2/3] Unpacking smartloop ($version)${NC}"
     Expand-Archive -Path $archivePath -DestinationPath $tmp -Force
 
+    Write-Host "${MUTED}[3/3] Setting up smartloop ($version)${NC}"
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item -Path (Join-Path $tmp "$name\smartloop.exe") -Destination $InstallDir -Force
 
-    Write-Host "Installed $(Join-Path $InstallDir 'smartloop.exe')" -ForegroundColor Green
+    Write-Host "${GREEN}Installed${NC} $(Join-Path $InstallDir 'smartloop.exe')"
+
+    Write-Host "${MUTED}Processing triggers for smartloop ($version) ...$NC"
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath -notlike "*$InstallDir*") {
         [Environment]::SetEnvironmentVariable('Path', "$InstallDir;$userPath", 'User')
-        Write-Host "Added $InstallDir to your PATH. Restart your shell to pick it up."
+        Write-Host "${MUTED}Added ${NC}smartloop${MUTED} to your PATH (${InstallDir})${NC}"
     }
+
+    Write-Banner -Version $version -Dir $InstallDir
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
