@@ -11,9 +11,13 @@ set -eu
 REPO="smartloop-ai/smartloop-cli"
 INSTALL_DIR="${SMARTLOOP_CLI_INSTALL_DIR:-$HOME/.smartloop/bin}"
 
-# Colors, only when stdout is a terminal.
+# Colors, only when stdout is a terminal.  These hold real escape bytes rather
+# than the two-character "\033" sequence, because printf expands escapes in its
+# format string but never in an argument -- and these get interpolated into
+# both.
 if [ -t 1 ]; then
-    GREEN='\033[1;32m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
+    esc="$(printf '\033')"
+    GREEN="${esc}[1;32m"; RED="${esc}[0;31m"; BOLD="${esc}[1m"; NC="${esc}[0m"
 else
     GREEN=''; RED=''; BOLD=''; NC=''
 fi
