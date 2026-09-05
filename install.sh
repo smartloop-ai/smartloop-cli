@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 # Smartloop CLI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)
 #   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: $CARGO_HOME/bin when a
 #                              Rust toolchain is present, else ~/.local/bin)
-set -euo pipefail
+set -eu
 
 REPO="smartloop-ai/smartloop-cli"
 
@@ -23,7 +23,12 @@ else
     MUTED=''; PINK=''; GREEN=''; RED=''; BOLD=''; NC=''
 fi
 
-error() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
+# dash's echo has no -e and prints it literally, so every message goes through
+# printf %b -- %b expands the backslash escapes the colour variables hold,
+# which a printf format string would expand but an argument would not.
+say() { printf '%b\n' "$1"; }
+
+error() { say "${RED}Error:${NC} $1" >&2; exit 1; }
 
 # One trap for both jobs: the scratch directory, and the cursor that
 # download_with_progress hides -- a crash mid-download would otherwise leave it
@@ -42,7 +47,10 @@ need() {
 }
 
 on_path() {
-    [[ ":${PATH}:" == *":$1:"* ]]
+    case ":${PATH}:" in
+        *":$1:"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Map uname output onto the Rust target triple the release is built for.
@@ -102,7 +110,7 @@ verify_checksum() {
     elif command -v shasum >/dev/null 2>&1; then
         actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
     else
-        echo -e "${MUTED}No sha256 tool found; skipping checksum verification${NC}"
+        say "${MUTED}No sha256 tool found; skipping checksum verification${NC}"
         return 0
     fi
 
@@ -141,9 +149,9 @@ progress_bar() {
 
     local filled=$(( percent * space_available / 100 ))
 
-    local bar="" i
-    for (( i=0; i<filled; i++ )); do bar+="▇"; done
-    for (( i=filled; i<space_available; i++ )); do bar+=" "; done
+    local bar="" i=0
+    while [ "$i" -lt "$filled" ]; do bar="${bar}▇"; i=$((i + 1)); done
+    while [ "$i" -lt "$space_available" ]; do bar="${bar} "; i=$((i + 1)); done
 
     local dl_str total_str
     dl_str="$(format_bytes "$bytes")"
@@ -196,7 +204,7 @@ download_with_progress() {
 # on PATH below if it is not there already.
 default_install_dir() {
     local cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-    if [[ -d "$cargo_bin" && -w "$cargo_bin" ]]; then
+    if [ -d "$cargo_bin" ] && [ -w "$cargo_bin" ]; then
         printf '%s\n' "$cargo_bin"
     else
         printf '%s\n' "$HOME/.local/bin"
@@ -211,12 +219,12 @@ add_to_path() {
         return 0
     fi
 
-    if [[ -w "$config_file" ]]; then
+    if [ -w "$config_file" ]; then
         printf '\n# smartloop\n%s\n' "$command" >> "$config_file"
-        echo -e "${MUTED}Added ${NC}smartloop${MUTED} to \$PATH in ${NC}${config_file}"
+        say "${MUTED}Added ${NC}smartloop${MUTED} to \$PATH in ${NC}${config_file}"
     else
-        echo -e "${MUTED}Manually add to ${NC}${config_file}${MUTED}:${NC}"
-        echo -e "  $command"
+        say "${MUTED}Manually add to ${NC}${config_file}${MUTED}:${NC}"
+        say "  $command"
     fi
 }
 
@@ -250,15 +258,15 @@ setup_path() {
     esac
 
     for f in $config_files; do
-        if [[ -f "$f" ]]; then
+        if [ -f "$f" ]; then
             config_file="$f"
             break
         fi
     done
 
-    if [[ -z "$config_file" ]]; then
-        echo -e "${MUTED}No config file found for ${NC}${current_shell}${MUTED}. Manually add to your shell config:${NC}"
-        echo -e "  $path_command"
+    if [ -z "$config_file" ]; then
+        say "${MUTED}No config file found for ${NC}${current_shell}${MUTED}. Manually add to your shell config:${NC}"
+        say "  $path_command"
         return 0
     fi
 
@@ -266,43 +274,43 @@ setup_path() {
 }
 
 print_banner() {
-    echo -e ""
-    echo -e "${PINK}█▀ █▀▄▀█ ▄▀█ █▀█ ▀█▀ █   █▀█ █▀█ █▀█${NC}"
-    echo -e "${PINK}▄█ █ ▀ █ █▀█ █▀▄  █  █▄▄ █▄█ █▄█ █▀▀${NC}"
-    echo -e ""
-    echo -e "${MUTED}Version: ${NC}${VERSION}"
-    echo -e ""
+    say ""
+    say "${PINK}█▀ █▀▄▀█ ▄▀█ █▀█ ▀█▀ █   █▀█ █▀█ █▀█${NC}"
+    say "${PINK}▄█ █ ▀ █ █▀█ █▀▄  █  █▄▄ █▄█ █▄█ █▀▀${NC}"
+    say ""
+    say "${MUTED}Version: ${NC}${VERSION}"
+    say ""
 
     if on_path "$INSTALL_DIR"; then
-        echo -e "${MUTED}To get started:${NC}"
-        echo -e ""
-        echo -e "  smartloop project list  ${MUTED}# List your projects${NC}"
+        say "${MUTED}To get started:${NC}"
+        say ""
+        say "  smartloop project list  ${MUTED}# List your projects${NC}"
     else
-        echo -e "${MUTED}To get started, restart your terminal or run:${NC}"
-        echo -e ""
+        say "${MUTED}To get started, restart your terminal or run:${NC}"
+        say ""
         case "$(basename "${SHELL:-bash}")" in
-            fish) echo -e "  source ~/.config/fish/config.fish" ;;
-            zsh)  echo -e "  source ${ZDOTDIR:-$HOME}/.zshrc" ;;
-            *)    echo -e "  source ~/.bashrc" ;;
+            fish) say "  source ~/.config/fish/config.fish" ;;
+            zsh)  say "  source ${ZDOTDIR:-$HOME}/.zshrc" ;;
+            *)    say "  source ~/.bashrc" ;;
         esac
-        echo -e ""
-        echo -e "${MUTED}Then run:${NC}"
-        echo -e ""
-        echo -e "  smartloop project list  ${MUTED}# List your projects${NC}"
+        say ""
+        say "${MUTED}Then run:${NC}"
+        say ""
+        say "  smartloop project list  ${MUTED}# List your projects${NC}"
     fi
 
-    echo -e ""
-    echo -e "${MUTED}For more information visit ${NC}https://smartloop.ai/docs/intro/"
-    echo -e ""
+    say ""
+    say "${MUTED}For more information visit ${NC}https://smartloop.ai/docs/intro/"
+    say ""
 }
 
 install_smartloop() {
     need curl
     need tar
 
-    echo -e "${MUTED}Reading package lists...${NC}"
+    say "${MUTED}Reading package lists...${NC}"
     detect_target
-    echo -e "${MUTED}Reading package lists... Done${NC}"
+    say "${MUTED}Reading package lists... Done${NC}"
 
     VERSION="${SMARTLOOP_CLI_VERSION:-$(latest_version || true)}"
     [ -n "$VERSION" ] || error "Could not determine the latest release; set SMARTLOOP_CLI_VERSION"
@@ -314,19 +322,19 @@ install_smartloop() {
     local archive="${name}.${ARCHIVE_EXT}"
     local base_url="https://github.com/${REPO}/releases/download/v${VERSION}"
 
-    echo -e "${MUTED}The following NEW packages will be installed:${NC}"
-    echo -e "  ${BOLD}smartloop${NC} ${MUTED}(${VERSION}, ${TARGET})${NC}"
+    say "${MUTED}The following NEW packages will be installed:${NC}"
+    say "  ${BOLD}smartloop${NC} ${MUTED}(${VERSION}, ${TARGET})${NC}"
 
     TMP_DIR="$(mktemp -d)"
 
-    echo -e "${MUTED}[1/3] Downloading smartloop (${VERSION})${NC}"
+    say "${MUTED}[1/3] Downloading smartloop (${VERSION})${NC}"
     download_with_progress "${base_url}/${archive}" "${TMP_DIR}/${archive}" \
         "Get:1 smartloop ${VERSION}"
     curl -fsSL "${base_url}/SHA256SUMS" -o "${TMP_DIR}/SHA256SUMS" \
         || error "Could not download SHA256SUMS"
     verify_checksum "${TMP_DIR}/${archive}" "${TMP_DIR}/SHA256SUMS"
 
-    echo -e "${MUTED}[2/3] Unpacking smartloop (${VERSION})${NC}"
+    say "${MUTED}[2/3] Unpacking smartloop (${VERSION})${NC}"
     if [ "$ARCHIVE_EXT" = "zip" ]; then
         need unzip
         unzip -q "${TMP_DIR}/${archive}" -d "$TMP_DIR"
@@ -334,7 +342,7 @@ install_smartloop() {
         tar -xzf "${TMP_DIR}/${archive}" -C "$TMP_DIR"
     fi
 
-    echo -e "${MUTED}[3/3] Setting up smartloop (${VERSION})${NC}"
+    say "${MUTED}[3/3] Setting up smartloop (${VERSION})${NC}"
     mkdir -p "$INSTALL_DIR"
     install -m 755 "${TMP_DIR}/${name}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null \
         || { cp "${TMP_DIR}/${name}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" \
@@ -343,15 +351,15 @@ install_smartloop() {
     "${INSTALL_DIR}/${BIN_NAME}" --version >/dev/null 2>&1 \
         || error "Installation verification failed: 'smartloop --version' did not succeed"
 
-    echo -e "${GREEN}Installed${NC} ${INSTALL_DIR}/${BIN_NAME}"
+    say "${GREEN}Installed${NC} ${INSTALL_DIR}/${BIN_NAME}"
 
-    echo -e "${MUTED}Processing triggers for smartloop (${VERSION}) ...${NC}"
+    say "${MUTED}Processing triggers for smartloop (${VERSION}) ...${NC}"
     if [ "$OS" = "pc-windows-msvc" ]; then
         # No POSIX rc file to edit under MSYS/Cygwin; install.ps1 sets the real
         # Windows user PATH.
         on_path "$INSTALL_DIR" || {
-            echo -e "${MUTED}Add the following to your PATH:${NC}"
-            echo -e "  ${BOLD}${INSTALL_DIR}${NC}"
+            say "${MUTED}Add the following to your PATH:${NC}"
+            say "  ${BOLD}${INSTALL_DIR}${NC}"
         }
     else
         setup_path "$INSTALL_DIR"

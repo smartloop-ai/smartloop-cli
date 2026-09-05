@@ -7,7 +7,7 @@ Smartloop CLI is designed to use with studio desktop and interacting with local 
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
 ```
 
 Windows (PowerShell):
