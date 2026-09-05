@@ -16,9 +16,21 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.ps1 | iex
 ```
 
-The binary lands in `~/.smartloop/bin` (`%USERPROFILE%\.smartloop\bin` on
-Windows). Set `SMARTLOOP_CLI_INSTALL_DIR` to install elsewhere, or
-`SMARTLOOP_CLI_VERSION` to pin a specific release.
+The installer aims for a directory your `PATH` already covers, so there is
+nothing to configure afterwards. It picks the first of:
+
+1. `$CARGO_HOME/bin` (`~/.cargo/bin`), if a Rust toolchain put it there
+2. `~/.local/bin`, if it is already on your `PATH`
+3. `~/.smartloop/bin` otherwise — the installer then prints the `export PATH`
+   line to add
+
+Windows follows the same order minus step 2 (`~/.local/bin` is not a Windows
+convention), and when it does fall back to `%USERPROFILE%\.smartloop\bin` the
+installer adds that to your user `PATH` for you — restart the shell to pick it
+up.
+
+Set `SMARTLOOP_CLI_INSTALL_DIR` to install elsewhere, or `SMARTLOOP_CLI_VERSION`
+to pin a specific release.
 
 Prebuilt binaries are published for Linux (x86_64, aarch64 — statically linked
 against musl), macOS (Apple Silicon and Intel) and Windows (x86_64).

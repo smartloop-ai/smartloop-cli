@@ -5,11 +5,46 @@
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)
-#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: $HOME/.smartloop/bin)
+#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: the first of
+#                              $CARGO_HOME/bin or ~/.local/bin that is already
+#                              on PATH, else $HOME/.smartloop/bin)
 set -eu
 
 REPO="smartloop-ai/smartloop-cli"
-INSTALL_DIR="${SMARTLOOP_CLI_INSTALL_DIR:-$HOME/.smartloop/bin}"
+
+on_path() {
+    case ":${PATH}:" in
+        *":$1:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Where the binary lands.  Nothing this script does can change the PATH of the
+# shell that invoked it -- piped into `sh`, it is a child process -- so aim for
+# a directory the user's PATH already covers and there is nothing left to do.
+#
+# A Rust toolchain has $CARGO_HOME/bin on PATH; failing that, ~/.local/bin is
+# the conventional home for user-installed binaries and most distributions put
+# it on PATH already.  Only when neither applies do we fall back to our own
+# directory and print advice.  ($HOME/.smartloop is the studio's data
+# directory, so the binary sits beside it rather than inside the data itself.)
+default_install_dir() {
+    cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+    if [ -d "$cargo_bin" ] && [ -w "$cargo_bin" ]; then
+        printf '%s\n' "$cargo_bin"
+        return
+    fi
+
+    local_bin="$HOME/.local/bin"
+    if on_path "$local_bin" && { [ -w "$local_bin" ] || [ ! -e "$local_bin" ]; }; then
+        printf '%s\n' "$local_bin"
+        return
+    fi
+
+    printf '%s\n' "$HOME/.smartloop/bin"
+}
+
+INSTALL_DIR="${SMARTLOOP_CLI_INSTALL_DIR:-$(default_install_dir)}"
 
 # Colors, only when stdout is a terminal.  These hold real escape bytes rather
 # than the two-character "\033" sequence, because printf expands escapes in its
@@ -132,14 +167,11 @@ main() {
 
     printf "${GREEN}Installed${NC} %s\n" "${INSTALL_DIR}/${BIN_NAME}"
 
-    case ":${PATH}:" in
-        *":${INSTALL_DIR}:"*) ;;
-        *)
-            info ""
-            info "Add it to your PATH:"
-            info "    export PATH=\"${INSTALL_DIR}:\$PATH\""
-            ;;
-    esac
+    if ! on_path "$INSTALL_DIR"; then
+        info ""
+        info "Add it to your PATH:"
+        info "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+    fi
 }
 
 main "$@"

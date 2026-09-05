@@ -4,13 +4,24 @@
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)
-#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: $HOME\.smartloop\bin)
+#   SMARTLOOP_CLI_INSTALL_DIR  Install directory (default: $CARGO_HOME\bin when a
+#                              Rust toolchain is present, else $HOME\.smartloop\bin)
 
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'smartloop-ai/smartloop-cli'
+
+# Where the binary lands.  A Rust toolchain already has CARGO_HOME\bin on PATH,
+# so installing there means `smartloop` works straight away with no PATH edit.
+# Without one, fall back to our own directory -- $HOME\.smartloop is the
+# studio's data directory, so the binary sits beside it, not inside the data.
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+$cargoBin = Join-Path $cargoHome 'bin'
+
 $InstallDir = if ($env:SMARTLOOP_CLI_INSTALL_DIR) {
     $env:SMARTLOOP_CLI_INSTALL_DIR
+} elseif (Test-Path -Path $cargoBin -PathType Container) {
+    $cargoBin
 } else {
     Join-Path $HOME '.smartloop\bin'
 }
