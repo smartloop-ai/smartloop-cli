@@ -88,9 +88,6 @@ Point it elsewhere with `SMARTLOOP_API_URL`:
 SMARTLOOP_API_URL=http://localhost:9000 smartloop project list
 ```
 
-## Releases
+## License
 
-Releases are cut from the `Release` workflow — pick a `patch`, `minor` or
-`major` bump and it updates `Cargo.toml`, tags the commit, builds every target
-and publishes the archives together with a `SHA256SUMS` file that the
-installers verify against.
+Released under the [MIT License](LICENSE).
