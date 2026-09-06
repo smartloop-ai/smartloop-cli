@@ -1,6 +1,6 @@
 # Smartloop CLI installer for Windows.
 #
-#   irm https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.ps1 | iex
+#   irm https://smartloop.ai/install.ps1 | iex
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)

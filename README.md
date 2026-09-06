@@ -7,13 +7,13 @@ Smartloop CLI is designed to use with studio desktop and interacting with local 
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
+curl -fsSL https://smartloop.ai/install | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.ps1 | iex
+irm https://smartloop.ai/install.ps1 | iex
 ```
 
 The binary goes to `$CARGO_HOME/bin` (`~/.cargo/bin`) when a Rust toolchain

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Smartloop CLI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/smartloop-ai/smartloop-cli/main/install.sh | sh
+#   curl -fsSL https://smartloop.ai/install | sh
 #
 # Environment:
 #   SMARTLOOP_CLI_VERSION      Version to install (default: latest release)
