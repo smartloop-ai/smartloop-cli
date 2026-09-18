@@ -79,6 +79,32 @@ Delete a project:
 smartloop project delete --id <project-id>
 ```
 
+Start an interactive chat with the local agent:
+
+```sh
+smartloop run
+```
+
+Pass an initial prompt to send immediately; the session then keeps reading
+new prompts from stdin until EOF, `/quit`, `/exit`, `/q`, or `exit`:
+
+```sh
+smartloop run "what are some things to do in madrid spain?"
+```
+
+Options:
+
+```sh
+smartloop run --project <project-id>   # defaults to the server's current project
+smartloop run --model <model-name>     # defaults to sl-mini
+smartloop run --session <session-id>   # resume an existing session; a new one is created when omitted
+```
+
+The response streams token by token as it's generated. Progress from the
+agent's tool calls (web search, document lookup, model selection, etc.) is
+printed on stderr as `[step] message` lines, colored when the terminal
+supports it, so it doesn't interleave with the streamed answer on stdout.
+
 ## Configuration
 
 The CLI connects to the Smartloop API at `http://localhost:38540` by default.
