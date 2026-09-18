@@ -1,6 +1,9 @@
+use std::io::{IsTerminal, Write};
 use std::process::exit;
 
+use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
 use clap::{Parser, Subcommand};
+use futures_util::StreamExt;
 use prettytable::{Attr, Cell, Row, Table, color};
 use reqwest::blocking::{Client, Response, multipart};
 
@@ -25,6 +28,21 @@ enum Commands {
         /// Name of the project
         #[command(subcommand)]
         command: ProjectCommands,
+    },
+    /// Stream an interactive chat with the local agent
+    Run {
+        /// First message to send; the conversation continues interactively
+        #[arg(value_name = "PROMPT")]
+        prompt: Option<String>,
+        /// Project ID to use; defaults to the server's current project
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Model to request; defaults to sl-mini when omitted
+        #[arg(long, short)]
+        model: Option<String>,
+        /// Session ID to resume; a fresh one is created when omitted
+        #[arg(long, short)]
+        session: Option<String>,
     },
 }
 
@@ -53,9 +71,13 @@ enum ProjectCommands {
 }
 
 /// Base URL of the Smartloop API, overridable for non-default installs.
-fn projects_url() -> String {
+fn api_url() -> String {
     let base = std::env::var("SMARTLOOP_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    format!("{}/v1/projects", base.trim_end_matches('/'))
+    format!("{}/v1", base.trim_end_matches('/'))
+}
+
+fn projects_url() -> String {
+    format!("{}/projects", api_url())
 }
 
 /// Print an error and stop; used instead of panicking so failures read as
@@ -202,12 +224,218 @@ fn delete_project(client: &Client, id: String) {
     println!("Project deleted successfully");
 }
 
+/// ANSI color for a `chat.status` step name, grouped by what the step is
+/// doing rather than its exact label (the server's step vocabulary isn't a
+/// fixed contract, so unrecognized steps still get a sensible default).
+fn step_color(step: &str) -> &'static str {
+    match step {
+        "tools" | "web_search" | "explore" => "\x1b[36m", // cyan
+        "plan" => "\x1b[35m",                             // magenta
+        "model" => "\x1b[33m",                            // yellow
+        "preparing" | "streaming" => "\x1b[32m",          // green
+        "error" => "\x1b[31m",                            // red
+        _ => "\x1b[34m",                                  // blue
+    }
+}
+
+/// Print a `[step] message` progress line on stderr, coloring the step tag
+/// when stderr is a terminal and leaving plain text otherwise (piped output,
+/// redirected logs).
+fn print_status(step: &str, message: &str) {
+    if std::io::stderr().is_terminal() {
+        eprintln!(
+            "\x1b[2m[\x1b[0m{}{}\x1b[0m\x1b[2m]\x1b[0m {}",
+            step_color(step),
+            step,
+            message
+        );
+    } else {
+        eprintln!("[{}] {}", step, message);
+    }
+}
+
+/// Build the async SSE client used for chat streaming. Uses `async-openai`'s
+/// `eventsource_stream`-based SSE parser (the same approach real OpenAI SDKs
+/// use) instead of a hand-rolled line reader over a raw socket.
+fn openai_client() -> OpenAIClient<OpenAIConfig> {
+    OpenAIClient::with_config(
+        OpenAIConfig::new()
+            .with_api_base(api_url())
+            .with_api_key("not-needed"),
+    )
+}
+
+/// Stream one chat turn from the service's SSE endpoint, printing content the
+/// moment it arrives. Progress/status events are shown on stderr so they do
+/// not corrupt the answer. Returns an error message when the stream drops
+/// mid-way instead of exiting, so an interactive session can keep going after
+/// a server hiccup. Prints a token/throughput summary on stderr at [DONE].
+///
+/// Long-running tool steps can leave the connection idle long enough for the
+/// server (or a proxy in front of it) to drop it, which surfaces as a stream
+/// error before any content has streamed. Retry once in that case since a
+/// fresh connection usually succeeds.
+async fn run_turn(
+    client: &OpenAIClient<OpenAIConfig>,
+    message: &str,
+    project_id: &Option<String>,
+    model: &Option<String>,
+    session_id: &str,
+) -> Result<(), String> {
+    match run_turn_once(client, message, project_id, model, session_id).await {
+        Ok(_) => Ok(()),
+        Err((e, tokens)) if tokens == 0 => {
+            print_status("error", &format!("connection dropped, retrying: {}", e));
+            run_turn_once(client, message, project_id, model, session_id)
+                .await
+                .map_err(|(e, _)| e)
+        }
+        Err((e, _)) => Err(e),
+    }
+}
+
+async fn run_turn_once(
+    client: &OpenAIClient<OpenAIConfig>,
+    message: &str,
+    project_id: &Option<String>,
+    model: &Option<String>,
+    session_id: &str,
+) -> Result<(), (String, u64)> {
+    let mut body = serde_json::json!({
+        "model": model.as_deref().unwrap_or("sl-mini"),
+        "messages": [{"role": "user", "content": message}],
+        "session_id": session_id,
+        "stream": true,
+    });
+
+    if let Some(project_id) = project_id {
+        body["project_id"] = serde_json::Value::String(project_id.clone());
+    }
+
+    let started = std::time::Instant::now();
+    let mut stream = client
+        .chat()
+        .create_stream_byot::<serde_json::Value, serde_json::Value>(body)
+        .await
+        .map_err(|e| (format!("Failed to run: {}", e), 0))?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut tokens: u64 = 0;
+
+    while let Some(event) = stream.next().await {
+        let event = event.map_err(|e| (format!("Failed to read stream: {}", e), tokens))?;
+
+        match event["object"].as_str() {
+            Some("chat.completion.chunk") => {
+                if let Some(content) = event["choices"][0]["delta"]["content"].as_str() {
+                    tokens += 1;
+                    let _ = out.write_all(content.as_bytes());
+                    let _ = out.flush();
+                }
+                if event["choices"][0]["finish_reason"].is_string() {
+                    break;
+                }
+            }
+            Some("chat.status") => match event["message"].as_str() {
+                Some(message) if !message.trim().is_empty() => print_status(
+                    event["step"].as_str().unwrap_or_default(),
+                    message.trim(),
+                ),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    println!();
+    let elapsed = started.elapsed().as_secs_f64();
+    let tokens_per_sec = if elapsed > 0.0 && tokens > 0 {
+        tokens as f64 / elapsed
+    } else {
+        0.0
+    };
+    print_status(
+        "stats",
+        &format!("{} tokens, {:.1} tok/s, {:.0}s", tokens, tokens_per_sec, elapsed),
+    );
+
+    Ok(())
+}
+
+/// Interactive chat with the local agent: turn a reply, then keep reading new
+/// prompts from stdin until EOF, `/quit`, or `exit`. One `session_id` underpins
+/// the whole conversation, so the service keeps the context across turns.
+async fn run_chat(
+    client: &OpenAIClient<OpenAIConfig>,
+    first_prompt: Option<String>,
+    project_id: Option<String>,
+    model: Option<String>,
+    session: Option<String>,
+) {
+    let session_id = session.unwrap_or_else(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!(
+            "cli-{}-{}",
+            nanos,
+            std::process::id()
+        )
+    });
+    eprintln!("session: {}", session_id);
+
+    let stdin = std::io::stdin();
+
+    if let Some(prompt) = first_prompt.filter(|p| !p.trim().is_empty()) {
+        println!("> {}", prompt);
+        if let Err(e) = run_turn(client, &prompt, &project_id, &model, &session_id).await {
+            if std::io::stdin().is_terminal() {
+                eprintln!("{}", e);
+            } else {
+                fail(e);
+            }
+        }
+    }
+
+    loop {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+
+        let mut input = String::new();
+        if stdin
+            .read_line(&mut input)
+            .unwrap_or_else(|e| fail(format!("Failed to read input: {}", e)))
+            == 0
+        {
+            break;
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if matches!(input, "/quit" | "/exit" | "/q" | "exit" | "Exit") {
+            break;
+        }
+
+        if let Err(e) = run_turn(client, input, &project_id, &model, &session_id).await {
+            if std::io::stdin().is_terminal() {
+                eprintln!("{}", e);
+            } else {
+                fail(e);
+            }
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    let client = Client::new();
 
     match args.command {
         Commands::Project { command } => {
+            let client = Client::new();
             match command {
                 ProjectCommands::List => list_projects(&client),
                 ProjectCommands::Create { name, description, import } => {
@@ -223,6 +451,12 @@ fn main() {
                 }
                 ProjectCommands::Delete { id } => delete_project(&client, id),
             }
+        }
+        Commands::Run { prompt, project, model, session } => {
+            let runtime = tokio::runtime::Runtime::new()
+                .unwrap_or_else(|e| fail(format!("Failed to start async runtime: {}", e)));
+            let client = openai_client();
+            runtime.block_on(run_chat(&client, prompt, project, model, session));
         }
     }
 }
