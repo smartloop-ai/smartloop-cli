@@ -96,7 +96,6 @@ Options:
 
 ```sh
 smartloop run --project <project-id>   # defaults to the server's current project
-smartloop run --model <model-name>     # defaults to sl-mini
 smartloop run --session <session-id>   # resume an existing session; a new one is created when omitted
 ```
 

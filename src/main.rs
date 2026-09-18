@@ -37,9 +37,6 @@ enum Commands {
         /// Project ID to use; defaults to the server's current project
         #[arg(long, short)]
         project: Option<String>,
-        /// Model to request; defaults to sl-mini when omitted
-        #[arg(long, short)]
-        model: Option<String>,
         /// Session ID to resume; a fresh one is created when omitted
         #[arg(long, short)]
         session: Option<String>,
@@ -279,14 +276,13 @@ async fn run_turn(
     client: &OpenAIClient<OpenAIConfig>,
     message: &str,
     project_id: &Option<String>,
-    model: &Option<String>,
     session_id: &str,
 ) -> Result<(), String> {
-    match run_turn_once(client, message, project_id, model, session_id).await {
+    match run_turn_once(client, message, project_id, session_id).await {
         Ok(_) => Ok(()),
         Err((e, tokens)) if tokens == 0 => {
             print_status("error", &format!("connection dropped, retrying: {}", e));
-            run_turn_once(client, message, project_id, model, session_id)
+            run_turn_once(client, message, project_id, session_id)
                 .await
                 .map_err(|(e, _)| e)
         }
@@ -298,11 +294,13 @@ async fn run_turn_once(
     client: &OpenAIClient<OpenAIConfig>,
     message: &str,
     project_id: &Option<String>,
-    model: &Option<String>,
     session_id: &str,
 ) -> Result<(), (String, u64)> {
+    // The server-side orchestrator always picks the model that actually
+    // serves the turn; "sl-mini" here just names the entry point it routes
+    // through, not a choice the caller gets to make.
     let mut body = serde_json::json!({
-        "model": model.as_deref().unwrap_or("sl-mini"),
+        "model": "sl-mini",
         "messages": [{"role": "user", "content": message}],
         "session_id": session_id,
         "stream": true,
@@ -370,7 +368,6 @@ async fn run_chat(
     client: &OpenAIClient<OpenAIConfig>,
     first_prompt: Option<String>,
     project_id: Option<String>,
-    model: Option<String>,
     session: Option<String>,
 ) {
     let session_id = session.unwrap_or_else(|| {
@@ -390,7 +387,7 @@ async fn run_chat(
 
     if let Some(prompt) = first_prompt.filter(|p| !p.trim().is_empty()) {
         println!("> {}", prompt);
-        if let Err(e) = run_turn(client, &prompt, &project_id, &model, &session_id).await {
+        if let Err(e) = run_turn(client, &prompt, &project_id, &session_id).await {
             if std::io::stdin().is_terminal() {
                 eprintln!("{}", e);
             } else {
@@ -420,7 +417,7 @@ async fn run_chat(
             break;
         }
 
-        if let Err(e) = run_turn(client, input, &project_id, &model, &session_id).await {
+        if let Err(e) = run_turn(client, input, &project_id, &session_id).await {
             if std::io::stdin().is_terminal() {
                 eprintln!("{}", e);
             } else {
@@ -452,11 +449,11 @@ fn main() {
                 ProjectCommands::Delete { id } => delete_project(&client, id),
             }
         }
-        Commands::Run { prompt, project, model, session } => {
+        Commands::Run { prompt, project, session } => {
             let runtime = tokio::runtime::Runtime::new()
                 .unwrap_or_else(|e| fail(format!("Failed to start async runtime: {}", e)));
             let client = openai_client();
-            runtime.block_on(run_chat(&client, prompt, project, model, session));
+            runtime.block_on(run_chat(&client, prompt, project, session));
         }
     }
 }
