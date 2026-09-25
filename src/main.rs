@@ -34,7 +34,7 @@ enum Commands {
         /// First message to send; the conversation continues interactively
         #[arg(value_name = "PROMPT")]
         prompt: Option<String>,
-        /// Project ID to use; defaults to the server's current project
+        /// Project ID to use; prompts for one when omitted
         #[arg(long, short)]
         project: Option<String>,
         /// Session ID to resume; a fresh one is created when omitted
@@ -128,7 +128,7 @@ fn print_projects(projects: &[serde_json::Value]) {
 
 }
 
-fn list_projects(client: &Client) {
+fn fetch_projects(client: &Client) -> Vec<serde_json::Value> {
     let response = client
         .get(projects_url())
         .send()
@@ -138,15 +138,70 @@ fn list_projects(client: &Client) {
         fail(error_message("list projects", response));
     }
 
-    let data: serde_json::Value = response
+    let mut data: serde_json::Value = response
         .json()
         .unwrap_or_else(|e| fail(format!("Failed to parse response as JSON: {}", e)));
 
-    let projects = data["projects"]
-        .as_array()
-        .unwrap_or_else(|| fail("Expected projects to be an array".to_string()));
+    match data["projects"].take() {
+        serde_json::Value::Array(projects) => projects,
+        _ => fail("Expected projects to be an array".to_string()),
+    }
+}
 
-    print_projects(projects);
+fn list_projects(client: &Client) {
+    print_projects(&fetch_projects(client));
+}
+
+/// Pick the project a `run` session chats in. The chat request has to name a
+/// project: without one the server's supervisor handles the stream itself and
+/// drops it after the first event. Offers a numbered list on a terminal,
+/// defaulting to the server's current project; non-interactive runs take the
+/// current project without asking.
+fn select_project(client: &Client) -> String {
+    let projects = fetch_projects(client);
+    if projects.is_empty() {
+        fail("No projects found; create one with `smartloop project create`".to_string());
+    }
+
+    let default = projects
+        .iter()
+        .position(|p| p["current"].as_bool().unwrap_or_default())
+        .unwrap_or(0);
+    let id = |i: usize| projects[i]["id"].as_str().unwrap_or_default().to_string();
+    let name = |i: usize| projects[i]["name"].as_str().unwrap_or_default();
+
+    if projects.len() == 1 || !std::io::stdin().is_terminal() {
+        eprintln!("project: {}", name(default));
+        return id(default);
+    }
+
+    for i in 0..projects.len() {
+        let marker = if i == default { " (current)" } else { "" };
+        eprintln!("  {}. {}{}", i + 1, name(i), marker);
+    }
+
+    loop {
+        eprint!("Select a project [{}]: ", default + 1);
+        let _ = std::io::stderr().flush();
+
+        let mut input = String::new();
+        if std::io::stdin()
+            .read_line(&mut input)
+            .unwrap_or_else(|e| fail(format!("Failed to read input: {}", e)))
+            == 0
+        {
+            exit(0);
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            return id(default);
+        }
+        match input.parse::<usize>() {
+            Ok(n) if (1..=projects.len()).contains(&n) => return id(n - 1),
+            _ => eprintln!("Enter a number from 1 to {}", projects.len()),
+        }
+    }
 }
 
 /// Create an empty project — the blank template is a project with no skills,
@@ -275,7 +330,7 @@ fn openai_client() -> OpenAIClient<OpenAIConfig> {
 async fn run_turn(
     client: &OpenAIClient<OpenAIConfig>,
     message: &str,
-    project_id: &Option<String>,
+    project_id: &str,
     session_id: &str,
 ) -> Result<(), String> {
     match run_turn_once(client, message, project_id, session_id).await {
@@ -293,22 +348,19 @@ async fn run_turn(
 async fn run_turn_once(
     client: &OpenAIClient<OpenAIConfig>,
     message: &str,
-    project_id: &Option<String>,
+    project_id: &str,
     session_id: &str,
 ) -> Result<(), (String, u64)> {
     // The server-side orchestrator always picks the model that actually
     // serves the turn; "sl-mini" here just names the entry point it routes
     // through, not a choice the caller gets to make.
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "model": "sl-mini",
         "messages": [{"role": "user", "content": message}],
         "session_id": session_id,
+        "project_id": project_id,
         "stream": true,
     });
-
-    if let Some(project_id) = project_id {
-        body["project_id"] = serde_json::Value::String(project_id.clone());
-    }
 
     let started = std::time::Instant::now();
     let mut stream = client
@@ -367,7 +419,7 @@ async fn run_turn_once(
 async fn run_chat(
     client: &OpenAIClient<OpenAIConfig>,
     first_prompt: Option<String>,
-    project_id: Option<String>,
+    project_id: String,
     session: Option<String>,
 ) {
     let session_id = session.unwrap_or_else(|| {
@@ -450,6 +502,9 @@ fn main() {
             }
         }
         Commands::Run { prompt, project, session } => {
+            // Resolved before the async runtime starts: the blocking client
+            // must not run inside it.
+            let project = project.unwrap_or_else(|| select_project(&Client::new()));
             let runtime = tokio::runtime::Runtime::new()
                 .unwrap_or_else(|e| fail(format!("Failed to start async runtime: {}", e)));
             let client = openai_client();

@@ -85,6 +85,10 @@ Start an interactive chat with the local agent:
 smartloop run
 ```
 
+Without `--project`, `run` lists your projects and asks which one to chat in;
+press Enter to take the server's current project. With a single project, or
+when stdin isn't a terminal, the current project is used without asking.
+
 Pass an initial prompt to send immediately; the session then keeps reading
 new prompts from stdin until EOF, `/quit`, `/exit`, `/q`, or `exit`:
 
@@ -95,7 +99,7 @@ smartloop run "what are some things to do in madrid spain?"
 Options:
 
 ```sh
-smartloop run --project <project-id>   # defaults to the server's current project
+smartloop run --project <project-id>   # skip the project prompt
 smartloop run --session <session-id>   # resume an existing session; a new one is created when omitted
 ```
 
