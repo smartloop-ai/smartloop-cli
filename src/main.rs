@@ -29,6 +29,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProjectCommands,
     },
+    /// Inspect the local agent
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
     /// Stream an interactive chat with the local agent
     Run {
         /// First message to send; the conversation continues interactively
@@ -41,6 +46,12 @@ enum Commands {
         #[arg(long, short)]
         session: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Show the agent's endpoint, whether it is running, its model, and each project agent
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -67,10 +78,14 @@ enum ProjectCommands {
     },
 }
 
-/// Base URL of the Smartloop API, overridable for non-default installs.
-fn api_url() -> String {
+/// Base URL of the Smartloop agent, overridable for non-default installs.
+fn base_url() -> String {
     let base = std::env::var("SMARTLOOP_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    format!("{}/v1", base.trim_end_matches('/'))
+    base.trim_end_matches('/').to_string()
+}
+
+fn api_url() -> String {
+    format!("{}/v1", base_url())
 }
 
 fn projects_url() -> String {
@@ -261,6 +276,124 @@ fn report_created(response: Response, action: &str) {
 
     println!("{} successfully", action);
     print_projects(&[project]);
+}
+
+/// GET a JSON document from the agent, `None` when it is unreachable or
+/// answers with an error.
+fn get_json(client: &Client, url: String) -> Option<serde_json::Value> {
+    let response = client.get(url).send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().ok()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{:.0} MB", mb)
+    }
+}
+
+/// Report the agent's health from `/health` and its per-project processes from
+/// `/agents`. Exits non-zero when the agent cannot be reached, so scripts can
+/// use it as a liveness check.
+fn agent_status(client: &Client) {
+    println!("Endpoint: {}", base_url());
+
+    let Some(health) = get_json(client, format!("{}/health", base_url())) else {
+        println!("Status:   not running");
+        exit(1);
+    };
+
+    println!("Status:   {}", health["status"].as_str().unwrap_or("unknown"));
+
+    let model = health["model_name"].as_str().unwrap_or_default();
+    if health["model_loaded"].as_bool().unwrap_or_default() {
+        let mut details = Vec::new();
+        if let Some(quantization) = health["quantization"].as_str() {
+            details.push(quantization.to_string());
+        }
+        if let Some(n_ctx) = health["n_ctx"].as_u64() {
+            details.push(format!("{} ctx", n_ctx));
+        }
+        if let Some(size) = health["model_size_bytes"].as_u64() {
+            details.push(format_bytes(size));
+        }
+        if details.is_empty() {
+            println!("Model:    {}", model);
+        } else {
+            println!("Model:    {} ({})", model, details.join(", "));
+        }
+    } else {
+        println!("Model:    not loaded");
+    }
+
+    let Some(agents) = get_json(client, format!("{}/agents", base_url())) else {
+        return;
+    };
+    if !agents["supervised"].as_bool().unwrap_or_default() {
+        return;
+    }
+
+    let supervisor = &agents["supervisor"];
+    println!(
+        "Process:  pid {}, {}",
+        supervisor["pid"],
+        format_bytes(supervisor["rss_bytes"].as_u64().unwrap_or_default())
+    );
+
+    let children = agents["agents"].as_array().cloned().unwrap_or_default();
+    if children.is_empty() {
+        println!("No project agents running");
+        return;
+    }
+
+    // Project agents report only their id; show the name alongside it.
+    let names: std::collections::HashMap<String, String> =
+        get_json(client, projects_url())
+            .and_then(|data| data["projects"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|p| {
+                (
+                    p["id"].as_str().unwrap_or_default().to_string(),
+                    p["name"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+
+    let mut table = Table::new();
+    table.add_row(Row::new(vec![
+        Cell::new("Project"),
+        Cell::new("PID"),
+        Cell::new("Port"),
+        Cell::new("Alive"),
+        Cell::new("Idle"),
+        Cell::new("Memory"),
+    ]));
+
+    for agent in &children {
+        let id = agent["project_id"].as_str().unwrap_or_default();
+        let project = names.get(id).map(String::as_str).unwrap_or(id);
+        let alive = if agent["alive"].as_bool().unwrap_or_default() {
+            Cell::new("true").with_style(Attr::ForegroundColor(color::GREEN))
+        } else {
+            Cell::new("false").with_style(Attr::ForegroundColor(color::RED))
+        };
+        table.add_row(Row::new(vec![
+            Cell::new(project),
+            Cell::new(&agent["pid"].to_string()),
+            Cell::new(&agent["port"].to_string()),
+            alive,
+            Cell::new(&format!("{:.0}s", agent["idle_seconds"].as_f64().unwrap_or_default())),
+            Cell::new(&format_bytes(agent["rss_bytes"].as_u64().unwrap_or_default())),
+        ]));
+    }
+
+    table.printstd();
 }
 
 fn delete_project(client: &Client, id: String) {
@@ -501,6 +634,9 @@ fn main() {
                 ProjectCommands::Delete { id } => delete_project(&client, id),
             }
         }
+        Commands::Agent { command } => match command {
+            AgentCommands::Status => agent_status(&Client::new()),
+        },
         Commands::Run { prompt, project, session } => {
             // Resolved before the async runtime starts: the blocking client
             // must not run inside it.

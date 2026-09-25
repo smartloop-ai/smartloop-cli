@@ -79,6 +79,28 @@ Delete a project:
 smartloop project delete --id <project-id>
 ```
 
+Check which endpoint the CLI uses, whether the local agent is running there,
+which model it has loaded, and the per-project agents it has started:
+
+```sh
+smartloop agent status
+```
+
+```
+Endpoint: http://localhost:38540
+Status:   healthy
+Model:    sl-mini (Q4_K_M, 32768 ctx, 769 MB)
+Process:  pid 8738, 250 MB
++--------------+------+-------+-------+------+--------+
+| Project      | PID  | Port  | Alive | Idle | Memory |
++--------------+------+-------+-------+------+--------+
+| general_chat | 2668 | 62110 | true  | 94s  | 122 MB |
++--------------+------+-------+-------+------+--------+
+```
+
+`Endpoint` is the URL the CLI talks to (`SMARTLOOP_API_URL`, or the default).
+The command exits with status 1 when the agent can't be reached there.
+
 Start an interactive chat with the local agent:
 
 ```sh
