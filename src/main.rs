@@ -8,12 +8,17 @@ use prettytable::{Attr, Cell, Row, Table, color};
 use reqwest::blocking::{Client, Response, multipart};
 
 const DEFAULT_API_URL: &str = "http://localhost:38540";
+const LOGO: &str = r#"
+█▀ █▀▄▀█ ▄▀█ █▀█ ▀█▀ █   █▀█ █▀█ █▀█
+▄█ █ ▀ █ █▀█ █▀▄  █  █▄▄ █▄█ █▄█ █▀▀
+"#;
 
 #[derive(Parser)]
 #[command(
     name = "smartloop", 
     version, 
-    about="Smartloop Command Line Interface"
+    author,
+    about=format!("{}\nLocal AI assistant and model orchestrator", LOGO),
 )]
 
 struct Args {
